@@ -9,26 +9,26 @@ from keyboards import (
     client_main_kb,
     driver_active_kb,
     driver_main_kb,
+    driver_offer_kb,
     remove_kb,
     share_phone_kb,
 )
-from locations import location_name
 from states import DriverRegStates
+from utils.filters import IsDriver
+from utils.formatters import format_order_for_driver
 
 router = Router()
+# Фильтр на уровне роутера: хендлеры сообщений работают только для водителей.
+# Исключение — /driver (регистрация) и FSM-состояния регистрации,
+# которые явно заданы и перехватываются до фильтра.
+router.message.filter(IsDriver())
 
 
 # ---------- регистрация водителя ----------
+# /driver открыт для всех — переопределяем фильтр на уровне хендлера
 
-@router.message(Command("driver"))
+@router.message(Command("driver"), ~IsDriver())
 async def driver_entry(message: Message, state: FSMContext) -> None:
-    existing = await db.get_driver(message.from_user.id)
-    if existing:
-        await message.answer(
-            "Вы уже зарегистрированы как водитель.",
-            reply_markup=driver_main_kb(bool(existing["is_online"])),
-        )
-        return
     await state.set_state(DriverRegStates.code)
     await message.answer(
         "Регистрация водителя.\nВведите код доступа (выдаётся администратором):",
@@ -36,7 +36,16 @@ async def driver_entry(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(DriverRegStates.code)
+@router.message(Command("driver"))
+async def driver_already(message: Message) -> None:
+    driver = await db.get_driver(message.from_user.id)
+    await message.answer(
+        "Вы уже зарегистрированы как водитель.",
+        reply_markup=driver_main_kb(bool(driver["is_online"])),
+    )
+
+
+@router.message(DriverRegStates.code, ~IsDriver())
 async def driver_code(message: Message, state: FSMContext) -> None:
     if (message.text or "").strip() != DRIVER_REG_CODE:
         await message.answer("Неверный код. Попробуйте ещё раз или /cancel.")
@@ -45,7 +54,7 @@ async def driver_code(message: Message, state: FSMContext) -> None:
     await message.answer("Введите ваше имя и фамилию:")
 
 
-@router.message(DriverRegStates.full_name)
+@router.message(DriverRegStates.full_name, ~IsDriver())
 async def driver_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
     if len(name) < 2 or len(name) > 80:
@@ -59,7 +68,7 @@ async def driver_name(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(DriverRegStates.phone, F.contact)
+@router.message(DriverRegStates.phone, F.contact, ~IsDriver())
 async def driver_phone_contact(message: Message, state: FSMContext) -> None:
     contact: Contact = message.contact
     if contact.user_id != message.from_user.id:
@@ -67,10 +76,13 @@ async def driver_phone_contact(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(phone=contact.phone_number)
     await state.set_state(DriverRegStates.car)
-    await message.answer("Укажите марку и госномер автомобиля (например «Lada Granta, А123ВС»):", reply_markup=remove_kb())
+    await message.answer(
+        "Укажите марку и госномер автомобиля (например «Lada Granta, А123ВС»):",
+        reply_markup=remove_kb(),
+    )
 
 
-@router.message(DriverRegStates.phone)
+@router.message(DriverRegStates.phone, ~IsDriver())
 async def driver_phone_text(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if text.lower() == "пропустить":
@@ -84,7 +96,7 @@ async def driver_phone_text(message: Message, state: FSMContext) -> None:
     await message.answer("Укажите марку и госномер автомобиля:", reply_markup=remove_kb())
 
 
-@router.message(DriverRegStates.car)
+@router.message(DriverRegStates.car, ~IsDriver())
 async def driver_car(message: Message, state: FSMContext) -> None:
     car = (message.text or "").strip()
     if len(car) < 2 or len(car) > 80:
@@ -109,8 +121,6 @@ async def driver_car(message: Message, state: FSMContext) -> None:
 @router.message(F.text.in_({"🟢 Выйти на линию", "🔴 Уйти с линии"}))
 async def toggle_online(message: Message, bot: Bot) -> None:
     driver = await db.get_driver(message.from_user.id)
-    if not driver:
-        return
     new_online = not bool(driver["is_online"])
     await db.set_driver_online(message.from_user.id, new_online)
     await message.answer(
@@ -118,15 +128,11 @@ async def toggle_online(message: Message, bot: Bot) -> None:
         reply_markup=driver_main_kb(new_online),
     )
     if new_online:
-        # Если в очереди есть заказы без водителя — предложить
         for order in await db.list_new_orders():
             await _offer_order_to_driver(bot, order["id"], message.from_user.id)
 
 
 async def _offer_order_to_driver(bot: Bot, order_id: int, driver_id: int) -> None:
-    from handlers.client import _format_order_for_driver  # локальный импорт против циклов
-    from keyboards import driver_offer_kb
-
     order = await db.get_order(order_id)
     if not order or order["status"] != "new":
         return
@@ -134,7 +140,7 @@ async def _offer_order_to_driver(bot: Bot, order_id: int, driver_id: int) -> Non
     try:
         await bot.send_message(
             driver_id,
-            "🆕 <b>Новый заказ</b>\n\n" + _format_order_for_driver(order, client),
+            "🆕 <b>Новый заказ</b>\n\n" + format_order_for_driver(order, client),
             reply_markup=driver_offer_kb(order_id),
         )
     except Exception:
@@ -166,13 +172,11 @@ async def accept_order(cb: CallbackQuery, bot: Bot) -> None:
         return
     order = await db.get_order(order_id)
     client = await db.get_user(order["client_id"])
-    from handlers.client import _format_order_for_driver
     await cb.message.edit_text(
-        "✅ Заказ принят\n\n" + _format_order_for_driver(order, client),
+        "✅ Заказ принят\n\n" + format_order_for_driver(order, client),
         reply_markup=driver_active_kb(order_id, in_progress=False),
     )
     await cb.answer("Заказ ваш!")
-    # Уведомить клиента
     try:
         text = (
             f"✅ Водитель принял ваш заказ №{order_id}.\n\n"
@@ -198,9 +202,8 @@ async def start_trip(cb: CallbackQuery, bot: Bot) -> None:
         return
     order = await db.get_order(order_id)
     client = await db.get_user(order["client_id"])
-    from handlers.client import _format_order_for_driver
     await cb.message.edit_text(
-        "🚗 Поездка началась\n\n" + _format_order_for_driver(order, client),
+        "🚗 Поездка началась\n\n" + format_order_for_driver(order, client),
         reply_markup=driver_active_kb(order_id, in_progress=True),
     )
     await cb.answer("Поехали!")
@@ -258,15 +261,9 @@ async def driver_cancel(cb: CallbackQuery, bot: Bot) -> None:
         )
     except Exception:
         pass
-    # Перевыставляем как новый и оповещаем
-    import aiosqlite
-    from config import DB_PATH
-    async with aiosqlite.connect(DB_PATH) as conn:
-        await conn.execute(
-            "UPDATE orders SET status='new', driver_id=NULL, assigned_at=NULL WHERE id=?",
-            (order_id,),
-        )
-        await conn.commit()
+    # Возвращаем заказ в очередь через функцию БД (не прямой SQL)
+    await db.release_order(order_id)
+    # Оповещаем водителей о вернувшемся заказе
     from handlers.client import broadcast_order_to_drivers
     await broadcast_order_to_drivers(bot, order_id)
 
@@ -275,17 +272,13 @@ async def driver_cancel(cb: CallbackQuery, bot: Bot) -> None:
 
 @router.message(F.text == "📦 Мой заказ")
 async def driver_my_order(message: Message) -> None:
-    driver = await db.get_driver(message.from_user.id)
-    if not driver:
-        return
     order = await db.active_order_for_driver(message.from_user.id)
     if not order:
         await message.answer("У вас нет активного заказа.")
         return
     client = await db.get_user(order["client_id"])
-    from handlers.client import _format_order_for_driver
     await message.answer(
-        _format_order_for_driver(order, client),
+        format_order_for_driver(order, client),
         reply_markup=driver_active_kb(order["id"], in_progress=(order["status"] == "in_progress")),
     )
 
@@ -293,8 +286,6 @@ async def driver_my_order(message: Message) -> None:
 @router.message(F.text == "📋 Свободные заказы")
 async def free_orders(message: Message) -> None:
     driver = await db.get_driver(message.from_user.id)
-    if not driver:
-        return
     if not driver["is_online"]:
         await message.answer("Выйдите на линию, чтобы видеть и брать заказы.")
         return
@@ -305,11 +296,9 @@ async def free_orders(message: Message) -> None:
     if not orders:
         await message.answer("Свободных заказов нет.")
         return
-    from handlers.client import _format_order_for_driver
-    from keyboards import driver_offer_kb
     for order in orders:
         client = await db.get_user(order["client_id"])
         await message.answer(
-            _format_order_for_driver(order, client),
+            format_order_for_driver(order, client),
             reply_markup=driver_offer_kb(order["id"]),
         )

@@ -23,6 +23,11 @@ async def main() -> None:
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    # MemoryStorage хранит FSM-состояния в памяти процесса.
+    # При перезапуске бота незавершённые FSM-диалоги сбрасываются.
+    # Для продакшена замените на RedisStorage:
+    #   from aiogram.fsm.storage.redis import RedisStorage
+    #   storage = RedisStorage.from_url("redis://localhost:6379/0")
     dp = Dispatcher(storage=MemoryStorage())
 
     # Порядок важен: admin перехватывает команды, затем общие, затем клиент/водитель

@@ -1,5 +1,5 @@
 import aiosqlite
-from datetime import datetime
+from datetime import datetime, timezone
 from config import DB_PATH
 
 
@@ -42,7 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_driver ON orders(driver_id);
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 async def init_db() -> None:
@@ -271,6 +271,17 @@ async def list_new_orders() -> list[dict]:
             "SELECT * FROM orders WHERE status='new' ORDER BY id ASC"
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def release_order(order_id: int) -> None:
+    """Вернуть заказ в статус 'new' (например, после отказа водителя).
+    Используется вместо прямого SQL в обработчиках."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE orders SET status='new', driver_id=NULL, assigned_at=NULL WHERE id=?",
+            (order_id,),
+        )
+        await db.commit()
 
 
 async def stats() -> dict:

@@ -4,6 +4,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 import database as db
 from config import ADMIN_IDS
+from locations import location_name
 
 router = Router()
 
@@ -34,7 +35,7 @@ async def cmd_stats(message: Message) -> None:
         "<b>Статистика</b>\n"
         f"Водителей всего: {s['drivers_total']}\n"
         f"На линии: {s['drivers_online']}\n\n"
-        f"Заказы:\n"
+        "Заказы:\n"
         f"  🔎 новые: {orders.get('new', 0)}\n"
         f"  ✅ назначены: {orders.get('assigned', 0)}\n"
         f"  🚗 в поездке: {orders.get('in_progress', 0)}\n"
@@ -84,15 +85,10 @@ async def admin_delete_driver(cb: CallbackQuery, bot: Bot) -> None:
         await cb.message.edit_reply_markup()
         return
     await db.remove_driver(driver_id)
-    await cb.message.edit_text(
-        cb.message.html_text + "\n\n<b>❌ Удалён</b>",
-    )
+    await cb.message.edit_text(cb.message.html_text + "\n\n<b>❌ Удалён</b>")
     await cb.answer("Удалён.")
     try:
-        await bot.send_message(
-            driver_id,
-            "Администратор исключил вас из числа водителей.",
-        )
+        await bot.send_message(driver_id, "Администратор исключил вас из числа водителей.")
     except Exception:
         pass
 
@@ -105,10 +101,7 @@ async def cmd_orders(message: Message) -> None:
     if not orders:
         await message.answer("Очередь пуста.")
         return
-    from locations import location_name
     lines = ["<b>Свободные заказы:</b>"]
     for o in orders:
-        lines.append(
-            f"№{o['id']}: {location_name(o['pickup'])} → {location_name(o['destination'])}"
-        )
+        lines.append(f"№{o['id']}: {location_name(o['pickup'])} → {location_name(o['destination'])}")
     await message.answer("\n".join(lines))

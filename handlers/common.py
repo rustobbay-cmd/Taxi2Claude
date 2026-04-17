@@ -7,6 +7,7 @@ import database as db
 from keyboards import client_main_kb, driver_main_kb
 
 router = Router()
+# common-роутер не ограничивает по роли — обрабатывает всех пользователей.
 
 
 HELP_CLIENT = (

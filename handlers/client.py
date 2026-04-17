@@ -1,3 +1,5 @@
+import asyncio
+
 from aiogram import Bot, Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -12,71 +14,32 @@ from keyboards import (
 )
 from locations import location_name
 from states import OrderStates
+from utils.filters import IsClient
+from utils.formatters import format_order_for_client, format_order_for_driver
 
 router = Router()
+# Фильтр: только клиенты (не водители).
+router.message.filter(IsClient())
+
+# Lock против флуда: не даём одному user_id создать два заказа одновременно.
+_order_locks: dict[int, asyncio.Lock] = {}
 
 
-def _format_order_for_client(order: dict, driver: dict | None = None) -> str:
-    status_map = {
-        "new": "🔎 Ищем водителя…",
-        "assigned": "✅ Водитель назначен",
-        "in_progress": "🚗 Вы в поездке",
-        "completed": "🏁 Поездка завершена",
-        "cancelled": "✖️ Отменён",
-    }
-    text = (
-        f"<b>Заказ №{order['id']}</b>\n"
-        f"Откуда: {location_name(order['pickup'])}\n"
-        f"Куда: {location_name(order['destination'])}\n"
-    )
-    if order.get("comment"):
-        text += f"Комментарий: {order['comment']}\n"
-    text += f"Статус: {status_map.get(order['status'], order['status'])}"
-    if driver:
-        text += (
-            f"\n\n<b>Водитель</b>\n"
-            f"{driver['full_name']}"
-        )
-        if driver.get("car"):
-            text += f"\nАвто: {driver['car']}"
-        if driver.get("phone"):
-            text += f"\nТел.: {driver['phone']}"
-    return text
-
-
-def _format_order_for_driver(order: dict, client: dict | None = None) -> str:
-    text = (
-        f"<b>Заказ №{order['id']}</b>\n"
-        f"Откуда: {location_name(order['pickup'])}\n"
-        f"Куда: {location_name(order['destination'])}\n"
-    )
-    if order.get("comment"):
-        text += f"Комментарий: {order['comment']}\n"
-    if client:
-        name = client.get("full_name") or "Клиент"
-        text += f"\nКлиент: {name}"
-        if client.get("phone"):
-            text += f"\nТел.: {client['phone']}"
-        if client.get("username"):
-            text += f"\n@{client['username']}"
-    return text
+def _get_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in _order_locks:
+        _order_locks[user_id] = asyncio.Lock()
+    return _order_locks[user_id]
 
 
 # ---------- start order ----------
 
 @router.message(F.text == "🚕 Заказать такси")
 async def new_order(message: Message, state: FSMContext) -> None:
-    driver = await db.get_driver(message.from_user.id)
-    if driver:
-        await message.answer(
-            "Вы зарегистрированы как водитель. Клиентский заказ недоступен."
-        )
-        return
     active = await db.active_order_for_client(message.from_user.id)
     if active:
         await message.answer(
             "У вас уже есть активный заказ. Сначала завершите или отмените его.\n\n"
-            + _format_order_for_client(active)
+            + format_order_for_client(active)
         )
         return
     await state.set_state(OrderStates.pickup)
@@ -218,20 +181,37 @@ async def _show_confirm(message: Message, state: FSMContext, edit: bool) -> None
 
 @router.callback_query(F.data == "order:confirm", OrderStates.confirm)
 async def order_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    data = await state.get_data()
-    await state.clear()
-    order_id = await db.create_order(
-        client_id=cb.from_user.id,
-        pickup=data["pickup"],
-        destination=data["destination"],
-        comment=data.get("comment"),
-    )
+    user_id = cb.from_user.id
+    lock = _get_lock(user_id)
+
+    if lock.locked():
+        await cb.answer("Заказ уже создаётся…")
+        return
+
+    async with lock:
+        active = await db.active_order_for_client(user_id)
+        if active:
+            await state.clear()
+            await cb.message.edit_text(
+                "У вас уже есть активный заказ. Дождитесь его завершения."
+            )
+            await cb.answer()
+            return
+
+        data = await state.get_data()
+        await state.clear()
+        order_id = await db.create_order(
+            client_id=user_id,
+            pickup=data["pickup"],
+            destination=data["destination"],
+            comment=data.get("comment"),
+        )
+
     await cb.message.edit_text(
         f"✅ Заказ №{order_id} создан. Ищем водителя…\n\n"
         "Вы получите уведомление, как только водитель примет заказ."
     )
     await cb.answer()
-    # Оповещаем водителей
     await broadcast_order_to_drivers(bot, order_id)
 
 
@@ -242,7 +222,6 @@ async def broadcast_order_to_drivers(bot: Bot, order_id: int) -> None:
     client = await db.get_user(order["client_id"])
     drivers = await db.list_online_drivers()
     if not drivers:
-        # Никого на линии — сообщим клиенту
         try:
             await bot.send_message(
                 order["client_id"],
@@ -252,7 +231,7 @@ async def broadcast_order_to_drivers(bot: Bot, order_id: int) -> None:
         except Exception:
             pass
         return
-    text = "🆕 <b>Новый заказ</b>\n\n" + _format_order_for_driver(order, client)
+    text = "🆕 <b>Новый заказ</b>\n\n" + format_order_for_driver(order, client)
     for d in drivers:
         if await db.driver_has_active_order(d["user_id"]):
             continue
@@ -263,7 +242,6 @@ async def broadcast_order_to_drivers(bot: Bot, order_id: int) -> None:
                 reply_markup=driver_offer_kb(order_id),
             )
         except Exception:
-            # Водитель мог заблокировать бота — игнорируем
             continue
 
 
@@ -271,9 +249,6 @@ async def broadcast_order_to_drivers(bot: Bot, order_id: int) -> None:
 
 @router.message(F.text == "📦 Мой заказ")
 async def my_order(message: Message) -> None:
-    driver = await db.get_driver(message.from_user.id)
-    if driver:
-        return  # у водителей своя кнопка обрабатывается в driver.py
     active = await db.active_order_for_client(message.from_user.id)
     if not active:
         await message.answer("У вас нет активных заказов.", reply_markup=client_main_kb())
@@ -281,13 +256,11 @@ async def my_order(message: Message) -> None:
     driver_info = None
     if active.get("driver_id"):
         driver_info = await db.get_driver(active["driver_id"])
-    await message.answer(_format_order_for_client(active, driver_info))
+    await message.answer(format_order_for_client(active, driver_info))
 
 
 @router.message(F.text == "❌ Отменить заказ")
 async def cancel_active(message: Message, bot: Bot) -> None:
-    if await db.get_driver(message.from_user.id):
-        return
     active = await db.active_order_for_client(message.from_user.id)
     if not active:
         await message.answer("Нет активного заказа для отмены.")
