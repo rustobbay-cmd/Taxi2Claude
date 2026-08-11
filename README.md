@@ -1,4 +1,4 @@
-# Taxi2Claude
+# Система распределения заказов такси
 
 Простой Telegram-бот заказа такси для небольшого населённого пункта.
 
@@ -28,8 +28,8 @@
 ## Установка
 
 ```bash
-git clone <repo-url>
-cd Taxi2Claude
+git clone https://github.com/rustobbay-cmd/taxi-dispatch-bot.git
+cd taxi-dispatch-bot
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -41,7 +41,7 @@ cp .env.example .env
 ```
 BOT_TOKEN=токен_от_@BotFather
 ADMIN_IDS=123456789            # ваш Telegram ID, через запятую
-DRIVER_REG_CODE=taxi2024       # код, который выдаёте водителям для регистрации
+DRIVER_REG_CODE=change_me_to_a_private_code       # код, который выдаёте водителям для регистрации
 DB_PATH=taxi.db
 ```
 
@@ -90,7 +90,7 @@ LOCATIONS = [
 ## Структура проекта
 
 ```
-Taxi2Claude/
+taxi-dispatch-bot/
 ├── bot.py                 # точка входа
 ├── config.py              # загрузка .env
 ├── database.py            # SQLite через aiosqlite
